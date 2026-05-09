@@ -118,6 +118,26 @@ See the [iris-vector-graph examples](https://github.com/intersystems/iris-vector
 
 ---
 
+
+## PlanetCare Wiki
+
+`data/planetcare_wiki/` contains the fictional PlanetCare EMR knowledge base:
+
+| File | Status |
+|------|--------|
+| `billing.md` | Pre-existing — has 2 articles + documented gaps |
+| `laboratory.md` | Pre-existing — has 1 article + documented gaps |
+| `pharmacy.md` | Pre-existing — mostly empty, gaps documented |
+| *(generated)* | New articles added by the KB Mining pipeline |
+
+**The demo story:** PlanetCare already has *some* KB documentation. The clustering pipeline discovers patterns in the support backlog that aren't documented yet, and augments the existing articles with AI-generated sections — clearly marked for human review.
+
+Each generated section traces back to the source tickets in Graph_KG:
+```cypher
+MATCH (agent)-[:AUTHORED_KB]->(kb:KBArticle)<-[:SOURCED_KB]-(ticket:PCTicket)
+RETURN agent.agent_id, kb.article_id, ticket.ticket_id
+```
+
 ## Requirements
 
 - Python 3.10+

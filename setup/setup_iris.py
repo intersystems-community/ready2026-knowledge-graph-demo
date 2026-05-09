@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-setup_iris.py — Initialize IRIS schema and load PlanetCare demo data.
+setup_iris.py — Load PlanetCare demo data into IRIS using iris-vector-graph.
 
 Run once after IRIS starts:
     python setup/setup_iris.py
 
-Embedding provider (set via env vars, see .env.example):
-    EMBED_PROVIDER=local      # default — sentence-transformers, no API key
+Embedding provider (default: local MiniLM, no API key needed):
+    EMBED_PROVIDER=local      # sentence-transformers all-MiniLM-L6-v2 (default)
     EMBED_PROVIDER=openai     # requires OPENAI_API_KEY
     EMBED_PROVIDER=openrouter # requires OPENROUTER_API_KEY
-"""
-import os, sys, json, time
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    (see .env.example for all options)
 
+What this does:
+    1. Initializes Graph_KG schema via IRISGraphEngine.initialize_schema()
+    2. Creates pc_ticket:PC-##### nodes in Graph_KG
+    3. Stores 384-dim embeddings in kg_NodeEmbeddings (IVG's vector store)
+    4. Creates AFFECTS / EXHIBITS / FIXED_BY edges using GPT entity extraction
+    5. Loads planetcare_demo_tickets into PC.Tickets for SQL queries in notebooks
+"""
+import os, sys, json, time, re
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from setup.embedder import get_embedder, get_llm_client
 
 IRIS_HOST = os.getenv("IRIS_HOST", "localhost")
@@ -20,49 +28,157 @@ IRIS_PORT = int(os.getenv("IRIS_PORT", "11983"))
 IRIS_USER = os.getenv("IRIS_USERNAME", "_SYSTEM")
 IRIS_PASS = os.getenv("IRIS_PASSWORD", "SYS")
 
-print("PlanetCare Demo Setup")
+print("PlanetCare Demo — IRIS Setup")
 print("="*50)
 print(f"IRIS: {IRIS_HOST}:{IRIS_PORT}")
 
 import iris
-from openai import OpenAI
-
 try:
     conn = iris.connect(IRIS_HOST, IRIS_PORT, "USER", IRIS_USER, IRIS_PASS)
-    cur = conn.cursor()
     print("IRIS connection: OK")
 except Exception as e:
     print(f"IRIS connection failed: {e}")
     print("Make sure IRIS is running: cd docker && docker compose up -d")
     sys.exit(1)
 
+from iris_vector_graph import IRISGraphEngine
+from iris_vector_graph.operators import IRISGraphOperators
+
 embedder = get_embedder()
 llm_client, llm_model = get_llm_client()
 
-# Create tables
-print("\nCreating schema...")
+engine = IRISGraphEngine(conn, embedding_dimension=embedder.dim)
+cur = conn.cursor()
+
+print(f"\nEmbedder: {embedder.name} ({embedder.dim}-dim)")
+print(f"LLM: {llm_model or 'not configured — entity extraction will be skipped'}")
+
+print("\nInitializing Graph_KG schema...")
+engine.initialize_schema()
+print("  Schema ready")
+
+tickets_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "planetcare_demo_tickets.json"
+)
+tickets = json.load(open(tickets_path))
+print(f"\nLoaded {len(tickets)} PlanetCare tickets from {os.path.basename(tickets_path)}")
+
+print("\nCreating Graph_KG nodes...")
+nodes_created = 0
+for t in tickets:
+    tid = t.get("ticket_id", "")
+    node_id = f"pc_ticket:{tid}"
+    try:
+        engine.create_node(node_id, labels=["PCTicket", "Ticket"], properties={
+            "ticket_id": tid,
+            "text": f"{t.get('Summary','')} {t.get('Problem','')[:200]}",
+            "category": t.get("Classification", ""),
+            "hospital": t.get("Hospital", ""),
+            "status": t.get("Status", "Open"),
+            "has_solution": str(t.get("has_solution", False)),
+            "system": "PlanetCare",
+        })
+        nodes_created += 1
+    except Exception:
+        pass
+conn.commit()
+print(f"  {nodes_created} ticket nodes created in Graph_KG")
+
+print(f"\nStoring embeddings in kg_NodeEmbeddings ({embedder.dim}-dim)...")
+BATCH = 32
+stored = 0
+for i in range(0, len(tickets), BATCH):
+    batch = tickets[i:i+BATCH]
+    texts = [f"{t.get('Summary','')} {t.get('Problem','')[:400]}" for t in batch]
+    vectors = embedder.embed(texts)
+    items = []
+    for t, vec in zip(batch, vectors):
+        items.append({
+            "node_id": f"pc_ticket:{t['ticket_id']}",
+            "embedding": vec,
+            "metadata": {
+                "category": t.get("Classification", ""),
+                "status": t.get("Status", "Open"),
+                "has_solution": t.get("has_solution", False),
+            }
+        })
+    engine.store_embeddings(items)
+    stored += len(items)
+    print(f"  {stored}/{len(tickets)}", end="\r", flush=True)
+print(f"\n  Stored {stored} embeddings")
+
+if llm_client:
+    print("\nExtracting entities and building graph edges (GPT)...")
+    edges_created = 0
+    for i in range(0, len(tickets), 10):
+        batch = tickets[i:i+10]
+        ticket_texts = [
+            f"{t['ticket_id']}: {t.get('Summary','')} | {t.get('Problem','')[:200]}"
+            for t in batch
+        ]
+        prompt = (
+            "For each PlanetCare ticket, extract: modules (PC-Finance, PC-Lab, PC-Pharmacy, "
+            "PC-HL7Gateway, PC-PrintService, PC-Forms, PC-WaitList, PC-Orders etc), "
+            "errors (specific error messages), symptoms (what user reported). "
+            "Return JSON array: [{ticket_id, modules:[], errors:[], symptoms:[], root_cause:str}]"
+        )
+        try:
+            resp = llm_client.chat.completions.create(
+                model=llm_model,
+                messages=[{"role": "user", "content": f"{prompt}\n\nTickets:\n" + "\n".join(ticket_texts)}],
+                response_format={"type": "json_object"},
+                max_tokens=2000, temperature=0.2,
+            )
+            data = json.loads(resp.choices[0].message.content)
+            ents = data if isinstance(data, list) else (data.get("tickets") or list(data.values())[0] if data else [])
+
+            for ent in ents:
+                tid = ent.get("ticket_id", "")
+                ticket_node = f"pc_ticket:{tid}"
+                for mod in (ent.get("modules") or [])[:3]:
+                    if mod:
+                        mod_id = f"PC_MODULE:{mod.upper()[:30]}"
+                        engine.create_node(mod_id, labels=["PCModule"], properties={"text": mod, "system": "PlanetCare"})
+                        engine.create_edge(ticket_node, "AFFECTS", mod_id)
+                        edges_created += 1
+                for err in (ent.get("errors") or [])[:2]:
+                    if err and len(str(err)) > 5:
+                        err_id = f"PC_ERROR:{str(err)[:40].upper().replace(' ','_')}"
+                        engine.create_node(err_id, labels=["PCError"], properties={"text": str(err)[:100], "system": "PlanetCare"})
+                        engine.create_edge(ticket_node, "EXHIBITS", err_id)
+                        edges_created += 1
+                rc = ent.get("root_cause", "")
+                if rc and len(rc) > 10:
+                    t_orig = next((t for t in batch if t.get("ticket_id") == tid), {})
+                    if t_orig.get("has_solution"):
+                        rc_id = f"PC_RES:{tid}"
+                        engine.create_node(rc_id, labels=["PCResolution"], properties={"text": str(rc)[:300], "system": "PlanetCare"})
+                        engine.create_edge(ticket_node, "FIXED_BY", rc_id)
+                        edges_created += 1
+            conn.commit()
+        except Exception as e:
+            pass
+        print(f"  Batch {i//10+1}/{len(tickets)//10+1}: {edges_created} edges", end="\r", flush=True)
+    print(f"\n  {edges_created} graph edges created (AFFECTS/EXHIBITS/FIXED_BY)")
+else:
+    print("\nSkipping entity extraction (no LLM configured).")
+    print("Graph walk will still work — ticket nodes and embeddings are in place.")
+    print("Set OPENAI_API_KEY or OPENROUTER_API_KEY and re-run for entity edges.")
+
+print("\nCreating PC.Tickets SQL table for notebook queries...")
 for ddl in [
-    "DROP TABLE IF EXISTS PC.TicketVectors",
     "DROP TABLE IF EXISTS PC.Tickets",
     """CREATE TABLE PC.Tickets (
         ticket_id VARCHAR(20) PRIMARY KEY,
         summary VARCHAR(500),
-        description VARCHAR(5000),
+        problem VARCHAR(3000),
+        solution VARCHAR(2000),
         classification VARCHAR(100),
         hospital VARCHAR(200),
         status VARCHAR(20),
-        resolution VARCHAR(2000),
-        priority VARCHAR(5),
-        pc_module VARCHAR(100),
-        version VARCHAR(50)
-    )""",
-    f"""CREATE TABLE PC.TicketVectors (
-        id VARCHAR(20) PRIMARY KEY,
-        embedding VECTOR(FLOAT, {embedder.dim}),
-        document VARCHAR(3000),
-        m_classification VARCHAR(100),
-        m_status VARCHAR(20)
-    )""",
+        has_solution TINYINT
+    )"""
 ]:
     try:
         cur.execute(ddl)
@@ -71,101 +187,40 @@ for ddl in [
         if "already" not in str(e).lower():
             print(f"  DDL note: {e}")
 
-print("  Tables created")
-
-# Load tickets
-tickets_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "planetcare_tickets.json")
-tickets = json.load(open(tickets_path))
-
-def normalize_priority(p):
-    p = str(p or "").strip().upper()
-    if p in ("P1", "CRITICAL", "URGENT", "HIGH"): return "P1"
-    if p in ("P3", "LOW", "MINOR"): return "P3"
-    return "P2"
-
 inserted = 0
 for t in tickets:
     try:
         cur.execute(
-            "INSERT INTO PC.Tickets (ticket_id,summary,description,classification,hospital,status,resolution,priority,pc_module,version) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            [t.get("ticket_id",""), t.get("summary","")[:500], t.get("description","")[:5000],
-             t.get("classification",""), t.get("hospital",""), t.get("status","Open"),
-             t.get("resolution","")[:2000], normalize_priority(t.get("priority","")),
-             t.get("module","PC-Core"), t.get("version","PlanetCare 4.2")]
+            "INSERT INTO PC.Tickets (ticket_id,summary,problem,solution,classification,hospital,status,has_solution) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [t.get("ticket_id",""), t.get("Summary","")[:500],
+             t.get("Problem","")[:3000], t.get("Solution","")[:2000],
+             t.get("Classification",""), t.get("Hospital",""),
+             t.get("Status","Open"), 1 if t.get("has_solution") else 0]
         )
         inserted += 1
     except Exception as e:
         if "UNIQUE" not in str(e) and "-119" not in str(e):
             pass
 conn.commit()
-print(f"  Loaded {inserted} tickets into PC.Tickets")
+print(f"  {inserted} tickets in PC.Tickets")
 
-# Embed
-if embedder:
-    print(f"\nEmbedding tickets with {embedder.name} (dim={embedder.dim})...")
-    cur.execute("SELECT ticket_id, summary, description, classification, status FROM PC.Tickets")
-    rows = cur.fetchall()
-    embedded = 0
-    for i in range(0, len(rows), 20):
-        batch = rows[i:i+20]
-        texts = [f"{r[1]} {(r[2] or '')[:400]}" for r in batch]
-        vectors = embedder.embed(texts)
-        for (tid, s, d, cat, status), vec_vals in zip(batch, vectors):
-            vec = ",".join(str(round(x, 6)) for x in vec_vals)
-            try:
-                cur.execute(
-                    "INSERT INTO PC.TicketVectors (id,embedding,document,m_classification,m_status) VALUES (?,TO_VECTOR(?),?,?,?)",
-                    [tid, vec, f"{s} {(d or '')[:300]}"[:3000], cat, status]
-                )
-                embedded += 1
-            except: pass
-        conn.commit()
-        print(f"  {embedded}/{len(rows)}", end="\r", flush=True)
-    print(f"\n  Embedded {embedded} tickets ({embedder.dim}-dim)")
-else:
-    print("\nSkipping embeddings. Vector search will not work.")
-    print("Run with EMBED_PROVIDER=local (default) or set an API key.")
-
-# KBAC roles for demo agents
-print("\nSetting up demo agent roles...")
-ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-roles = [
-    ("user:pc.discovery.agent",   "KGWriter"),
-    ("user:pc.phi.router.agent",  "PHIReader"),
-    ("user:pc.phi.router.agent",  "KGReader"),
-    ("user:pc.coordinator.agent", "PHIReader"),
-    ("user:pc.coordinator.agent", "KGReader"),
-    ("user:pc.mds.checker.agent", "KGReader"),
-    ("user:pc.mds.checker.agent", "KGWriter"),
-]
-try:
-    cur.execute("""CREATE TABLE IF NOT EXISTS PC.Roles (
-        role_id VARCHAR(100) PRIMARY KEY,
-        agent_id VARCHAR(100),
-        role_name VARCHAR(50),
-        granted_at VARCHAR(30)
-    )""")
-    for agent, role in roles:
-        rid = f"{agent}:{role}"
-        try:
-            cur.execute("INSERT INTO PC.Roles (role_id,agent_id,role_name,granted_at) VALUES (?,?,?,?)",
-                [rid, agent, role, ts])
-        except: pass
-    conn.commit()
-    print(f"  {len(roles)} role assignments created")
-except Exception as e:
-    print(f"  Roles note: {e}")
-
-cur.execute("SELECT COUNT(*) FROM PC.Tickets"); t = cur.fetchone()[0]
-cur.execute("SELECT COUNT(*) FROM PC.TicketVectors"); v = cur.fetchone()[0]
-
+stats = engine.graph_stats()
 print(f"""
 Setup complete!
-  PC.Tickets:       {t:,}
-  PC.TicketVectors: {v:,}
+  Graph_KG nodes:      {stats.get('node_count', 0):,}
+  Embeddings:          {stats.get('embedding_count', 0):,}  ({embedder.dim}-dim)
+  Graph edges:         {stats.get('edge_count', 0):,}
+  PC.Tickets (SQL):    {inserted:,}
+
+Try in the notebook:
+  engine.kg_KNN_VEC(query_json, k=8)          # vector search
+  engine.kg_VECTOR_GRAPH_SEARCH(query_json)    # hybrid search
+  ops.kg_GRAPH_WALK('pc_ticket:PC-00001')      # graph traversal
+  engine.execute_cypher("MATCH (t:PCTicket)...")
 
 Next steps:
   jupyter notebook notebooks/
-  → Open planetcare_clustering_demo.ipynb  (no IRIS required)
-  → Open planetcare_system_demo.ipynb      (uses IRIS on port {IRIS_PORT})
+  → planetcare_clustering_demo.ipynb  (no IRIS needed)
+  → planetcare_system_demo.ipynb      (uses IVG on port {IRIS_PORT})
 """)
