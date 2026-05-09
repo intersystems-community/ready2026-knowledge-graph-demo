@@ -5,16 +5,20 @@ setup_iris.py — Initialize IRIS schema and load PlanetCare demo data.
 Run once after IRIS starts:
     python setup/setup_iris.py
 
-Then open the notebooks.
+Embedding provider (set via env vars, see .env.example):
+    EMBED_PROVIDER=local      # default — sentence-transformers, no API key
+    EMBED_PROVIDER=openai     # requires OPENAI_API_KEY
+    EMBED_PROVIDER=openrouter # requires OPENROUTER_API_KEY
 """
 import os, sys, json, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from setup.embedder import get_embedder, get_llm_client
 
 IRIS_HOST = os.getenv("IRIS_HOST", "localhost")
 IRIS_PORT = int(os.getenv("IRIS_PORT", "11983"))
 IRIS_USER = os.getenv("IRIS_USERNAME", "_SYSTEM")
 IRIS_PASS = os.getenv("IRIS_PASSWORD", "SYS")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 
 print("PlanetCare Demo Setup")
 print("="*50)
@@ -32,11 +36,8 @@ except Exception as e:
     print("Make sure IRIS is running: cd docker && docker compose up -d")
     sys.exit(1)
 
-if not OPENAI_KEY:
-    print("WARNING: OPENAI_API_KEY not set — vector embedding will be skipped")
-    print("Set it with: export OPENAI_API_KEY=sk-...")
-
-client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+embedder = get_embedder()
+llm_client, llm_model = get_llm_client()
 
 # Create tables
 print("\nCreating schema...")
@@ -55,9 +56,9 @@ for ddl in [
         pc_module VARCHAR(100),
         version VARCHAR(50)
     )""",
-    """CREATE TABLE PC.TicketVectors (
+    f"""CREATE TABLE PC.TicketVectors (
         id VARCHAR(20) PRIMARY KEY,
-        embedding VECTOR(FLOAT, 1536),
+        embedding VECTOR(FLOAT, {embedder.dim}),
         document VARCHAR(3000),
         m_classification VARCHAR(100),
         m_status VARCHAR(20)
@@ -100,17 +101,17 @@ conn.commit()
 print(f"  Loaded {inserted} tickets into PC.Tickets")
 
 # Embed
-if client:
-    print("\nEmbedding tickets with ada-002 (this takes ~2 minutes)...")
+if embedder:
+    print(f"\nEmbedding tickets with {embedder.name} (dim={embedder.dim})...")
     cur.execute("SELECT ticket_id, summary, description, classification, status FROM PC.Tickets")
     rows = cur.fetchall()
     embedded = 0
     for i in range(0, len(rows), 20):
         batch = rows[i:i+20]
         texts = [f"{r[1]} {(r[2] or '')[:400]}" for r in batch]
-        resp = client.embeddings.create(model="text-embedding-ada-002", input=texts)
-        for (tid, s, d, cat, status), e in zip(batch, resp.data):
-            vec = ",".join(str(round(x, 6)) for x in e.embedding)
+        vectors = embedder.embed(texts)
+        for (tid, s, d, cat, status), vec_vals in zip(batch, vectors):
+            vec = ",".join(str(round(x, 6)) for x in vec_vals)
             try:
                 cur.execute(
                     "INSERT INTO PC.TicketVectors (id,embedding,document,m_classification,m_status) VALUES (?,TO_VECTOR(?),?,?,?)",
@@ -120,10 +121,10 @@ if client:
             except: pass
         conn.commit()
         print(f"  {embedded}/{len(rows)}", end="\r", flush=True)
-    print(f"\n  Embedded {embedded} tickets")
+    print(f"\n  Embedded {embedded} tickets ({embedder.dim}-dim)")
 else:
-    print("\nSkipping embeddings (no API key). Vector search will not work.")
-    print("Set OPENAI_API_KEY and re-run to enable.")
+    print("\nSkipping embeddings. Vector search will not work.")
+    print("Run with EMBED_PROVIDER=local (default) or set an API key.")
 
 # KBAC roles for demo agents
 print("\nSetting up demo agent roles...")
