@@ -8,46 +8,46 @@ Uses **PlanetCare**, a fictional EMR system — all data is synthetic, safe to s
 
 ---
 
+## What's Here
+
+| Notebook | What it shows |
+|----------|--------------|
+| `planetcare_clustering_demo.ipynb` | MDS gap → HDBSCAN clustering → resolution anchoring → KB article → wiki augmentation + Graph_KG audit |
+| `planetcare_system_demo.ipynb` | iris-vector-graph API: `kg_KNN_VEC`, `kg_VECTOR_GRAPH_SEARCH`, `kg_GRAPH_WALK`, Cypher |
+
+Both notebooks require IRIS Community and an OpenAI API key (or compatible alternative).
+
+---
+
 ## Quick Start
 
-### Notebook 1 — Clustering (no IRIS, no API key needed)
+**Prerequisites:**
+- [IRIS Community](https://containers.intersystems.com) — free, runs in Docker
+- OpenAI API key — for KB article synthesis and graph entity extraction
+- Python 3.10+, Docker
 
 ```bash
 git clone https://github.com/intersystems-community/ready2026-knowledge-graph-demo
 cd ready2026-knowledge-graph-demo
+
+# Start IRIS Community
+cd docker && docker compose up -d && cd ..
+# Wait ~60s for IRIS to start
+
+# Set your API key
+export OPENAI_API_KEY=sk-...
+
+# Install dependencies and initialize IRIS + Graph_KG
 pip install -r requirements.txt
-jupyter notebook notebooks/planetcare_clustering_demo.ipynb
-```
-
-Runs entirely in Python. Uses `all-MiniLM-L6-v2` locally for embeddings.  
-An OpenAI API key is only needed for KB article synthesis (optional — clustering works without it).
-
-### Notebook 2 — Full System Demo (IRIS + iris-vector-graph)
-
-**Step 1 — Copy and configure**
-```bash
-cp .env.example .env
-# Edit .env — set IRIS_PORT if needed, add OPENAI_API_KEY or OPENROUTER_API_KEY
-```
-
-**Step 2 — Start IRIS Community**
-```bash
-cd docker && docker compose up -d
-# Wait ~60s, then check: docker ps | grep planetcare-iris
-```
-
-**Step 3 — Initialize Graph_KG and load data**
-```bash
 python setup/setup_iris.py
-# Loads 276 tickets as Graph_KG nodes with embeddings (IVG)
-# Creates AFFECTS/EXHIBITS/FIXED_BY entity edges (requires LLM)
-# No API key needed for embedding (local MiniLM by default)
-```
 
-**Step 4 — Open notebooks**
-```bash
+# Open notebooks
 jupyter notebook notebooks/
 ```
+
+> **Using OpenRouter, Ollama, or another provider?**  
+> Copy `.env.example` to `.env` and set `LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY`.  
+> Any OpenAI-compatible endpoint works — see `.env.example` for all options.
 
 ---
 
@@ -56,20 +56,23 @@ jupyter notebook notebooks/
 ### Clustering Demo (`planetcare_clustering_demo.ipynb`)
 
 1. **The data quality problem** — 276 PlanetCare tickets, 58% with no resolution text. The norm, not the exception.
-2. **HDBSCAN clustering** — embed problem descriptions with `all-MiniLM-L6-v2`, clusters emerge automatically. No labels required.
-3. **Why it works** — the model encodes *semantic intent*, not keywords. Similar problems group together across different modules and phrasings.
+2. **HDBSCAN clustering** — embed problem descriptions with `all-MiniLM-L6-v2`, clusters emerge automatically without any labeling.
+3. **Why it works** — the model encodes *semantic intent*, not keywords. Similar problems group together across different phrasings.
 4. **Resolution-anchored discovery** — the 42% with solutions become anchors. Each anchor suggests fixes for similar unresolved tickets in its cluster.
-5. **KB article generation** — LLM synthesizes a structured article from the cluster's anchor tickets.
-6. **Wiki augmentation** — article appended to `data/planetcare_wiki/billing.md` (pre-existing doc with documented gaps). Provenance recorded in Graph_KG.
+5. **KB article generation** — GPT-4o-mini synthesizes a structured article from the cluster's anchor tickets.
+6. **Wiki augmentation** — article appended to `data/planetcare_wiki/billing.md` (pre-existing doc with documented gaps). AUTHORED_KB and SOURCED_KB edges recorded in Graph_KG.
 
 ### System Demo (`planetcare_system_demo.ipynb`)
 
-1. **`engine.kg_KNN_VEC(query_json, k=8)`** — K-nearest neighbors by embedding similarity
-2. **`engine.kg_VECTOR_GRAPH_SEARCH(query_json)`** — hybrid: vector + graph expansion
-3. **`ops.kg_GRAPH_WALK(node, depth=2)`** — traverse AFFECTS/EXHIBITS/FIXED_BY edges
-4. **`ops.kg_NEIGHBORHOOD_EXPANSION(entities)`** — find tickets sharing the same modules/errors
-5. **`engine.execute_cypher(query)`** — direct graph queries
-6. **KB synthesis** — LLM writes from cluster, result goes to wiki + Graph_KG audit trail
+Uses iris-vector-graph directly:
+
+```python
+engine.kg_KNN_VEC(query_json, k=8)              # K-nearest by embedding similarity
+engine.kg_VECTOR_GRAPH_SEARCH(query_json)        # hybrid: vector + graph expansion
+ops.kg_GRAPH_WALK("pc_ticket:PC-00001", depth=2) # traverse entity edges
+ops.kg_NEIGHBORHOOD_EXPANSION(entity_nodes)      # find tickets sharing same entities
+engine.execute_cypher("MATCH (t:PCTicket)...")   # direct Cypher queries
+```
 
 ---
 
@@ -77,8 +80,8 @@ jupyter notebook notebooks/
 
 ```
 notebooks/
-  planetcare_clustering_demo.ipynb   ← Start here (no IRIS needed)
-  planetcare_system_demo.ipynb       ← iris-vector-graph API demo
+  planetcare_clustering_demo.ipynb   ← The main demo
+  planetcare_system_demo.ipynb       ← iris-vector-graph API showcase
 
 data/
   planetcare_demo_tickets.json       ← 276 synthetic PlanetCare tickets
@@ -86,13 +89,13 @@ data/
     questionnaire_clusters_anon.csv  ← 295 anonymized questionnaire tickets
     questionnaire_kb_articles_anon.json
   planetcare_wiki/
-    billing.md                       ← Pre-existing KB, has documented gaps
-    laboratory.md                    ← Pre-existing KB, has documented gaps
+    billing.md                       ← Pre-existing KB, documented gaps
+    laboratory.md                    ← Pre-existing KB, documented gaps
     pharmacy.md                      ← Mostly empty — gaps noted
 
 setup/
-  setup_iris.py    ← Initializes Graph_KG via IRISGraphEngine
-  embedder.py      ← Local / OpenAI / OpenRouter / custom embedding abstraction
+  setup_iris.py    ← Initializes Graph_KG via IRISGraphEngine, loads tickets, builds embeddings
+  embedder.py      ← Embedding provider abstraction (local / OpenAI / OpenRouter / custom)
 
 docker/
   docker-compose.yml   ← IRIS Community container
@@ -110,34 +113,17 @@ All data is synthetic — no real patient data, no real hospital names.
 | File | Description |
 |------|-------------|
 | `data/planetcare_demo_tickets.json` | 276 synthetic PlanetCare tickets · 7 categories · 42% resolved / 58% open |
-| `data/planetcare/questionnaire_clusters_anon.csv` | 295 anonymized questionnaire tickets with pre-computed cluster labels |
+| `data/planetcare/questionnaire_clusters_anon.csv` | 295 anonymized questionnaire tickets with cluster labels |
 | `data/planetcare_wiki/*.md` | Pre-existing KB articles with documented knowledge gaps |
-
----
-
-## Embedding and LLM Configuration
-
-Defaults require **no API key**. Set providers in `.env` or as environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EMBED_PROVIDER` | `local` | `local` / `openai` / `openrouter` / `custom` |
-| `LLM_PROVIDER` | `openai` | `openai` / `openrouter` / `custom` |
-| `OPENAI_API_KEY` | — | Required if using OpenAI for embedding or LLM |
-| `OPENROUTER_API_KEY` | — | Required if using OpenRouter |
-
-The clustering notebook works without any API key. KB article synthesis needs a language model.
-
-See `.env.example` for all options including local Ollama setup.
 
 ---
 
 ## PlanetCare Wiki
 
 `data/planetcare_wiki/` is the fictional PlanetCare KB.  
-Pre-existing articles document what's known. Each has a "Knowledge Gaps" section.
+Pre-existing articles document what's known, with explicit "Knowledge Gaps" sections.
 
-Running the clustering notebook **augments** these articles with AI-generated sections — clearly marked with source ticket count, agent ID, and a review warning.
+Running the clustering notebook **augments** these articles — AI-generated sections are appended, clearly marked with source ticket count, agent ID, timestamp, and a human-review warning.
 
 Provenance is recorded in Graph_KG:
 ```cypher
@@ -150,27 +136,14 @@ LIMIT 20
 
 ## iris-vector-graph
 
-This demo is built on [iris-vector-graph](https://github.com/intersystems/iris-vector-graph):
+This demo is built on [iris-vector-graph](https://github.com/intersystems/iris-vector-graph).  
+See the [iris-vector-graph examples](https://github.com/intersystems/iris-vector-graph/tree/main/examples) for more API patterns.
 
-```python
-from iris_vector_graph import IRISGraphEngine
-from iris_vector_graph.operators import IRISGraphOperators
-
-engine = IRISGraphEngine(conn, embedding_dimension=384)
-ops = IRISGraphOperators(conn)
-
-# Vector search
-results = engine.kg_KNN_VEC(query_json, k=8)
-
-# Hybrid vector + graph
-results = engine.kg_VECTOR_GRAPH_SEARCH(query_json, k=10, expansion_depth=1)
-
-# Graph walk
-walk = ops.kg_GRAPH_WALK("pc_ticket:PC-00001", max_depth=2)
-
-# Neighborhood expansion
-neighbors = ops.kg_NEIGHBORHOOD_EXPANSION(entity_nodes, expansion_depth=1)
-```
+**What `setup_iris.py` does:**
+- `engine.initialize_schema()` — sets up Graph_KG tables and indexes
+- `engine.create_node()` — creates `pc_ticket:PC-#####` nodes
+- `engine.store_embeddings()` — stores vectors in `kg_NodeEmbeddings` for `kg_KNN_VEC`
+- `engine.create_edge()` — builds AFFECTS/EXHIBITS/FIXED_BY/SOURCED_KB/AUTHORED_KB edges
 
 ---
 
@@ -180,7 +153,7 @@ The pipeline works on any ticket system:
 
 1. Export tickets to JSON: `[{ticket_id, Summary, Problem, Solution, Classification, Status}, ...]`
 2. Replace `data/planetcare_demo_tickets.json`
-3. Run `python setup/setup_iris.py` to ingest into Graph_KG
+3. Run `python setup/setup_iris.py`
 4. Open the notebooks — clustering and retrieval work on any EMR data
 
 ---
