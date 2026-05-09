@@ -22,32 +22,56 @@ Both notebooks require IRIS Community and an OpenAI API key (or compatible alter
 ## Quick Start
 
 **Prerequisites:**
-- [IRIS Community](https://containers.intersystems.com) — free, runs in Docker
-- OpenAI API key — for KB article synthesis and graph entity extraction
-- Python 3.10+, Docker
+- Docker (for IRIS Community — free container)
+- OpenAI API key (or see `.env.example` for OpenRouter / Ollama alternatives)
+- Python 3.10+
 
+**Step 1 — Clone and install**
 ```bash
 git clone https://github.com/intersystems-community/ready2026-knowledge-graph-demo
 cd ready2026-knowledge-graph-demo
-
-# Start IRIS Community
-cd docker && docker compose up -d && cd ..
-# Wait ~60s for IRIS to start
-
-# Set your API key
-export OPENAI_API_KEY=sk-...
-
-# Install dependencies and initialize IRIS + Graph_KG
 pip install -r requirements.txt
-python setup/setup_iris.py
-
-# Open notebooks
-jupyter notebook notebooks/
 ```
 
-> **Using OpenRouter, Ollama, or another provider?**  
-> Copy `.env.example` to `.env` and set `LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY`.  
-> Any OpenAI-compatible endpoint works — see `.env.example` for all options.
+**Step 2 — Start IRIS Community**
+```bash
+cd docker && docker compose up -d && cd ..
+```
+First run pulls the IRIS image (~2 GB). Subsequent starts are fast.  
+IRIS is ready when `docker ps` shows `healthy` for `planetcare-iris`.
+
+**Step 3 — Set your API key**
+```bash
+export OPENAI_API_KEY=sk-...
+# Or: cp .env.example .env  (edit for OpenRouter, Ollama, etc.)
+```
+
+**Step 4 — Initialize Graph_KG**
+```bash
+python setup/setup_iris.py
+```
+This loads 276 PlanetCare tickets into IRIS Graph_KG, builds 384-dim embeddings via `iris-vector-graph`, and uses GPT-4o-mini to extract entity edges (AFFECTS / EXHIBITS / FIXED_BY). Takes ~5 minutes.
+
+Expected output:
+```
+PlanetCare Demo — IRIS Setup
+IRIS connection: OK
+Embedder: all-MiniLM-L6-v2 (384-dim)
+LLM: gpt-4o-mini
+  276 ticket nodes created in Graph_KG
+  276 embeddings stored
+  606 graph edges created
+Setup complete!
+```
+
+**Step 5 — Open the notebooks**
+```bash
+jupyter notebook notebooks/
+```
+Start with `planetcare_clustering_demo.ipynb` — that's the one that generated the most discussion at READY.
+
+> **Using OpenRouter or Ollama instead?** Copy `.env.example` to `.env` and set `LLM_PROVIDER`.  
+> Any OpenAI-compatible endpoint works.
 
 ---
 
