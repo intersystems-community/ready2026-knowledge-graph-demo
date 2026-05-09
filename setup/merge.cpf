@@ -1,0 +1,6 @@
+[Startup]
+SystemMode=DEVELOPMENT
+
+[Actions]
+CreateDatabase:Name=/home/irisowner/mgr/,Size=2048
+ModifyService:Name=%Service_CallIn,Enabled=1

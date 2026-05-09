@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  iris:
+    image: containers.intersystems.com/intersystems/irishealth-community:2025.1
+    container_name: planetcare-iris
+    ports:
+      - "11983:1972"
+      - "52774:52773"
+    environment:
+      - ISC_CPF_MERGE_FILE=/home/irisowner/cpf/merge.cpf
+    volumes:
+      - ./setup/merge.cpf:/home/irisowner/cpf/merge.cpf:ro
+      - iris-data:/home/irisowner/mgr
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/localhost/1972"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+volumes:
+  iris-data:
