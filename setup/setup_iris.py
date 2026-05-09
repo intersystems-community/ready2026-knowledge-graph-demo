@@ -19,7 +19,9 @@ What this does:
     5. Loads planetcare_demo_tickets into PC.Tickets for SQL queries in notebooks
 """
 import os, sys, json, time, re
-sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, "reconfigure") else None
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from setup.embedder import get_embedder, get_llm_client
@@ -29,9 +31,9 @@ IRIS_PORT = int(os.getenv("IRIS_PORT", "11983"))
 IRIS_USER = os.getenv("IRIS_USERNAME", "_SYSTEM")
 IRIS_PASS = os.getenv("IRIS_PASSWORD", "SYS")
 
-sys.stdout.write(str("PlanetCare Demo — IRIS Setup")
-sys.stdout.write(str("="*50)
-sys.stdout.write(str(f"IRIS: {IRIS_HOST}:{IRIS_PORT}")
+print("PlanetCare Demo — IRIS Setup")
+print("="*50)
+print(f"IRIS: {IRIS_HOST}:{IRIS_PORT}")
 
 import iris
 try:
@@ -51,21 +53,21 @@ llm_client, llm_model = get_llm_client()
 engine = IRISGraphEngine(conn, embedding_dimension=embedder.dim)
 cur = conn.cursor()
 
-sys.stdout.write(str(f"\nEmbedder: {embedder.name} ({embedder.dim}-dim)")
-sys.stdout.write(str(f"LLM: {llm_model or 'not configured — entity extraction will be skipped'}")
+print(f"\nEmbedder: {embedder.name} ({embedder.dim}-dim)")
+print(f"LLM: {llm_model or 'not configured — entity extraction will be skipped'}")
 
-sys.stdout.write(str("\nInitializing Graph_KG schema...")
+print("\nInitializing Graph_KG schema...")
 engine.initialize_schema()
-sys.stdout.write(str("  Schema ready")
+print("  Schema ready")
 
 tickets_path = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data", "planetcare_demo_tickets.json"
 )
 tickets = json.load(open(tickets_path))
-sys.stdout.write(str(f"\nLoaded {len(tickets)} PlanetCare tickets from {os.path.basename(tickets_path)}")
+print(f"\nLoaded {len(tickets)} PlanetCare tickets from {os.path.basename(tickets_path)}")
 
-sys.stdout.write(str("\nCreating Graph_KG nodes...")
+print("\nCreating Graph_KG nodes...")
 nodes_created = 0
 for t in tickets:
     tid = t.get("ticket_id", "")
@@ -84,9 +86,9 @@ for t in tickets:
     except Exception:
         pass
 conn.commit()
-sys.stdout.write(str(f"  {nodes_created} ticket nodes created in Graph_KG")
+print(f"  {nodes_created} ticket nodes created in Graph_KG")
 
-sys.stdout.write(str(f"\nStoring embeddings in kg_NodeEmbeddings ({embedder.dim}-dim)...")
+print(f"\nStoring embeddings in kg_NodeEmbeddings ({embedder.dim}-dim)...")
 BATCH = 32
 stored = 0
 for i in range(0, len(tickets), BATCH):
@@ -107,7 +109,7 @@ for i in range(0, len(tickets), BATCH):
     engine.store_embeddings(items)
     stored += len(items)
     print(f"  {stored}/{len(tickets)}", end="\r", flush=True)
-sys.stdout.write(str(f"\n  Stored {stored} embeddings")
+print(f"\n  Stored {stored} embeddings")
 
 if llm_client:
     print("\nExtracting entities and building graph edges (GPT)...")
@@ -167,7 +169,7 @@ else:
     print("Graph walk will still work — ticket nodes and embeddings are in place.")
     print("Set OPENAI_API_KEY or OPENROUTER_API_KEY and re-run for entity edges.")
 
-sys.stdout.write(str("\nCreating PC.Tickets SQL table for notebook queries...")
+print("\nCreating PC.Tickets SQL table for notebook queries...")
 for ddl in [
     "DROP TABLE IF EXISTS PC.Tickets",
     """CREATE TABLE PC.Tickets (
@@ -204,10 +206,10 @@ for t in tickets:
         if "UNIQUE" not in str(e) and "-119" not in str(e):
             pass
 conn.commit()
-sys.stdout.write(str(f"  {inserted} tickets in PC.Tickets")
+print(f"  {inserted} tickets in PC.Tickets")
 
 stats = engine.graph_stats()
-sys.stdout.write(str(f"""
+print(f"""
 Setup complete!
   Graph_KG nodes:      {stats.get('node_count', 0):,}
   Embeddings:          {stats.get('embedding_count', 0):,}  ({embedder.dim}-dim)
