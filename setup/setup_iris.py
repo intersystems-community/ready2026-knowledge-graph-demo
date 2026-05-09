@@ -208,12 +208,23 @@ for t in tickets:
 conn.commit()
 print(f"  {inserted} tickets in PC.Tickets")
 
-stats = engine.graph_stats()
+try:
+    stats = engine.graph_stats()
+    node_count = stats.get('node_count', 0)
+    edge_count = stats.get('edge_count', 0)
+    embed_count = stats.get('embedding_count', 0)
+except AttributeError:
+    cur.execute("SELECT COUNT(*) FROM Graph_KG.nodes")
+    node_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM Graph_KG.rdf_edges")
+    edge_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM Graph_KG.kg_NodeEmbeddings")
+    embed_count = cur.fetchone()[0]
 print(f"""
 Setup complete!
-  Graph_KG nodes:      {stats.get('node_count', 0):,}
-  Embeddings:          {stats.get('embedding_count', 0):,}  ({embedder.dim}-dim)
-  Graph edges:         {stats.get('edge_count', 0):,}
+  Graph_KG nodes:      {node_count:,}
+  Embeddings:          {embed_count:,}  ({embedder.dim}-dim)
+  Graph edges:         {edge_count:,}
   PC.Tickets (SQL):    {inserted:,}
 
 Try in the notebook:
