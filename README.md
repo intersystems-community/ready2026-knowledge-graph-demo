@@ -4,7 +4,7 @@
 
 This repository demonstrates how semantic clustering turns a support ticket backlog into KB articles, and how IRIS GraphRAG enables hybrid vector + graph retrieval at scale.
 
-Uses **PlanetCare**, a fictional EMR system — all data is synthetic, safe to share and adapt.
+Uses **PlanetCare**, a fictional EMR system — all data is synthetic.
 
 ---
 
